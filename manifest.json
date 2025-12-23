@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini Apple Check",
+  "version": "1.0",
+  "description": "Step 1: Detect the word apple.",
+  "permissions": ["scripting"],
+  "content_scripts": [
+    {
+      "matches": ["*://gemini.google.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
