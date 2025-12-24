@@ -1,201 +1,154 @@
-console.log("Gemini Prompt Analyzer: Loaded");
+console.log("Gemini Co-Pilot: Loaded (Message Mode)");
 
 // ---------------------------------------------------------
-// 1. CSS STYLES
+// 1. STYLES (Same as before)
 // ---------------------------------------------------------
 const style = document.createElement("style");
 style.textContent = `
-  /* Highlight the WHOLE prompt */
-  ::highlight(search-highlight) {
-    text-decoration: underline wavy green;
-    text-decoration-thickness: 1px;
-    text-underline-offset: 3px;
-    background-color: rgba(0, 255, 0, 0.05); /* Slight green tint */
-    color: inherit;
+  ::highlight(state-ready) {
+    text-decoration: underline wavy #fbbc04;
+    text-decoration-thickness: 2px;
     cursor: pointer;
+    background-color: rgba(251, 188, 4, 0.1);
   }
-
-  /* Complex Metric Tooltip */
-  #gemini-extension-tooltip {
+  #copilot-tooltip {
     position: fixed;
     z-index: 10000;
-    background: #fff;
-    color: #333;
-    padding: 12px;
-    border-radius: 8px;
-    border: 1px solid #e0e0e0;
-    font-family: 'Segoe UI', sans-serif;
-    font-size: 13px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    background: white;
+    color: #202124;
+    padding: 12px 16px;
+    border-radius: 12px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+    font-family: 'Google Sans', Roboto, sans-serif;
+    font-size: 14px;
     display: none;
-    min-width: 200px;
-    pointer-events: none; /* Let mouse pass through */
+    max-width: 320px;
+    border: 1px solid #e0e0e0;
+    pointer-events: none;
+    transition: all 0.2s ease;
   }
-
-  /* Metric Rows */
-  .metric-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
-  .metric-label { color: #666; }
-  .metric-val { font-weight: bold; color: #1a73e8; }
-  
-  /* Divider Line */
-  .divider { height: 1px; background: #eee; margin: 8px 0; }
-
-  /* Hint Text at bottom */
-  .hint-text { font-size: 11px; color: #888; display: flex; align-items: center; }
-  .key-tag { background: #eee; border: 1px solid #ccc; border-radius: 3px; padding: 0 4px; font-size: 9px; margin-right: 5px; font-weight: bold; }
-
-  /* Preview Mode Styling */
-  .preview-box { font-style: italic; color: #555; background: #f9f9f9; padding: 8px; border-left: 3px solid #1a73e8; margin-bottom: 8px; }
+  .key-badge { background: #f1f3f4; border: 1px solid #dadce0; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: 700; color: #5f6368; margin-right: 8px; }
+  .status-ready { color: #e37400; font-weight: 600; }
+  .status-loading { color: #1a73e8; font-style: italic; }
+  .status-result { color: #137333; font-weight: 600; }
+  .preview-text { display: block; margin-top: 8px; padding: 8px; background: #f8f9fa; border-left: 3px solid #137333; font-style: italic; color: #444; font-size: 13px; line-height: 1.4; }
 `;
 document.head.appendChild(style);
 
-// Create the Tooltip Container
 const tooltip = document.createElement("div");
-tooltip.id = "gemini-extension-tooltip";
+tooltip.id = "copilot-tooltip";
 document.body.appendChild(tooltip);
 
 // ---------------------------------------------------------
-// 2. STATE MANAGEMENT
+// 2. LOGIC
 // ---------------------------------------------------------
 let typingTimer;
-const DONE_TYPING_INTERVAL = 1500; 
-let activeRange = null; // Stores the WHOLE prompt range
-let tabState = 0; // 0 = Info View, 1 = Preview Mode
+let activeRange = null; 
+let currentState = 0;   
+let generatedSummary = ""; 
 
-// The text we will swap in
-const REPLACEMENT_TEXT = "This information will be changed.";
-
-// ---------------------------------------------------------
-// 3. EVENT LISTENERS
-// ---------------------------------------------------------
-
-// A. TYPING (Debounce)
+// A. TYPING
 document.addEventListener('input', (e) => {
     const inputBox = document.querySelector('div[contenteditable="true"]');
     if (inputBox && inputBox.contains(e.target)) {
+        resetSystem(); 
         clearTimeout(typingTimer);
-        tooltip.style.display = "none";
-        tabState = 0; // Reset state on typing
-        
         typingTimer = setTimeout(() => {
-            analyzePrompt(inputBox);
-        }, DONE_TYPING_INTERVAL);
+            if(inputBox.innerText.length > 15) {
+                activateReadyState(inputBox);
+            }
+        }, 1500);
     }
 });
 
-// B. MOUSE MOVE (Hover)
+// B. HOVER
 document.addEventListener('mousemove', (e) => {
-    if (!activeRange) {
+    if (currentState === 0 || !activeRange) {
         tooltip.style.display = "none";
         return;
     }
-
     let isHovering = false;
-    const rects = activeRange.getClientRects();
-    
-    // Check if mouse is over ANY part of the highlighted paragraph
-    for (const rect of rects) {
+    for (const rect of activeRange.getClientRects()) {
         if (e.clientX >= rect.left && e.clientX <= rect.right &&
             e.clientY >= rect.top && e.clientY <= rect.bottom) {
-            
-            // Only update position if we are NOT in preview mode (keeps it stable)
-            updateTooltipContent(); 
-            // Position tooltip near the mouse, but slightly offset
-            tooltip.style.left = `${e.clientX + 15}px`;
-            tooltip.style.top = `${e.clientY + 15}px`;
+            tooltip.style.left = `${e.clientX + 20}px`;
+            tooltip.style.top = `${e.clientY + 20}px`;
             tooltip.style.display = "block";
             isHovering = true;
             break;
         }
     }
-
-    if (!isHovering) {
-        tooltip.style.display = "none";
-        tabState = 0; // Reset to initial state if mouse leaves
-    }
+    if (!isHovering) tooltip.style.display = "none";
 });
 
-// C. KEYBOARD (Tab Handler)
+// C. KEYBOARD (Tab)
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Tab' && activeRange && tooltip.style.display === 'block') {
         e.preventDefault();
         e.stopPropagation();
 
-        if (tabState === 0) {
-            // STATE 0 -> 1: Show Preview
-            tabState = 1;
-            updateTooltipContent();
-        } else if (tabState === 1) {
-            // STATE 1 -> ACTION: Replace Text
+        if (currentState === 1) {
+            // STATE 1 -> 2 (Loading)
+            updateTooltipUI("loading");
+            currentState = 2;
+
+            const currentText = activeRange.toString();
+            
+            // SEND MESSAGE TO BACKGROUND SCRIPT
+            chrome.runtime.sendMessage(
+                { action: "analyzeText", text: currentText },
+                (response) => {
+                    if (response && response.success) {
+                        generatedSummary = response.data;
+                        currentState = 3;
+                        updateTooltipUI("review");
+                    } else {
+                        generatedSummary = "Error: " + (response.error || "Unknown");
+                        updateTooltipUI("review"); // Show error in review box
+                    }
+                }
+            );
+
+        } else if (currentState === 3) {
             applyReplacement();
         }
     }
 });
 
-// ---------------------------------------------------------
-// 4. CORE LOGIC
-// ---------------------------------------------------------
-
-function analyzePrompt(rootElement) {
-    if (!CSS.highlights) return;
-    
-    const text = rootElement.innerText.toLowerCase();
-    
-    // 1. Count Apples
-    const count = (text.match(/apple/g) || []).length;
-
-    // 2. Logic: If less than 3, Clear Highlights and Exit
-    if (count < 3) {
-        CSS.highlights.clear();
-        activeRange = null;
-        return;
-    }
-
-    // 3. If 3+, Highlight EVERYTHING
-    activeRange = new Range();
-    activeRange.selectNodeContents(rootElement); // Select all text inside
-    
-    const highlight = new Highlight(activeRange);
-    CSS.highlights.set("search-highlight", highlight);
+function resetSystem() {
+    currentState = 0;
+    activeRange = null;
+    generatedSummary = "";
+    tooltip.style.display = "none";
+    if (CSS.highlights) CSS.highlights.clear();
 }
 
-function updateTooltipContent() {
-    if (tabState === 0) {
-        // VIEW 1: METRICS
-        tooltip.innerHTML = `
-            <div class="metric-row"><span class="metric-label">Accuracy:</span> <span class="metric-val">Low</span></div>
-            <div class="metric-row"><span class="metric-label">Precision:</span> <span class="metric-val">Weak</span></div>
-            <div class="metric-row"><span class="metric-label">Detail:</span> <span class="metric-val">Vague</span></div>
-            <div class="divider"></div>
-            <div class="hint-text"><span class="key-tag">TAB</span> Preview Fix</div>
-        `;
-    } else {
-        // VIEW 2: PREVIEW
-        tooltip.innerHTML = `
-            <div style="font-weight:bold; margin-bottom:5px;">Preview Change:</div>
-            <div class="preview-box">"${REPLACEMENT_TEXT}"</div>
-            <div class="divider"></div>
-            <div class="hint-text"><span class="key-tag">TAB</span> Apply Change</div>
-        `;
+function activateReadyState(rootElement) {
+    if (!CSS.highlights) return;
+    activeRange = new Range();
+    activeRange.selectNodeContents(rootElement);
+    const highlight = new Highlight(activeRange);
+    CSS.highlights.set("state-ready", highlight);
+    currentState = 1;
+    updateTooltipUI("ready");
+}
+
+function updateTooltipUI(mode) {
+    if (mode === "ready") {
+        tooltip.innerHTML = `<div class="status-ready">Analyze Prompt</div><div style="font-size:12px; color:#666; margin-top:4px;"><span class="key-badge">TAB</span> to refine</div>`;
+    } else if (mode === "loading") {
+        tooltip.innerHTML = `<div class="status-loading">✨ Gemini is thinking...</div>`;
+    } else if (mode === "review") {
+        tooltip.innerHTML = `<div class="status-result">Analysis Complete</div><span class="preview-text">${generatedSummary}</span><div style="font-size:12px; color:#666; margin-top:8px;"><span class="key-badge">TAB</span> to replace</div>`;
     }
 }
 
 function applyReplacement() {
     const inputBox = document.querySelector('div[contenteditable="true"]');
     if(inputBox) inputBox.focus();
-
-    // Select the whole range
     const selection = window.getSelection();
     selection.removeAllRanges();
     selection.addRange(activeRange);
-
-    // Replace
-    document.execCommand('insertText', false, REPLACEMENT_TEXT);
-
-    // Cleanup
-    selection.removeAllRanges();
-    CSS.highlights.clear();
-    tooltip.style.display = "none";
-    activeRange = null;
-    tabState = 0;
+    document.execCommand('insertText', false, generatedSummary);
+    resetSystem();
 }
