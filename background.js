@@ -3,98 +3,71 @@ importScripts('config.js');
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "analyzeText") {
     handleAnalysis(request.text, sendResponse);
-    return true; // Keep channel open for async response
+    return true; 
   }
 });
 
 async function handleAnalysis(originalText, sendResponse) {
   try {
     const API_KEY = CONFIG.GEMINI_API_KEY;
-    if (!API_KEY) throw new Error("API Key is missing in config.js");
+    if (!API_KEY) throw new Error("API Key missing.");
 
-    console.log("🔍 Step 1: Checking available models...");
-
-    // 1. Ask Google: "What models does this key have access to?"
+    // 1. Auto-select Model
     const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${API_KEY}`;
     const listResp = await fetch(listUrl);
-    
-    if (!listResp.ok) {
-      const err = await listResp.json();
-      throw new Error(`List Models Failed: ${JSON.stringify(err)}`);
-    }
-
     const listData = await listResp.json();
-    console.log("📋 Available Models:", listData.models);
-
-    // 2. Find a model that supports 'generateContent'
-    // We prefer 'flash' or 'pro' models if available.
-    let selectedModel = listData.models.find(m => 
-      m.name.includes('flash') && m.supportedGenerationMethods.includes('generateContent')
-    );
-
-    // If no flash, try pro
-    if (!selectedModel) {
-      selectedModel = listData.models.find(m => 
-        m.name.includes('pro') && m.supportedGenerationMethods.includes('generateContent')
-      );
-    }
-
-    // If neither, just take the first one that works
-    if (!selectedModel) {
-      selectedModel = listData.models.find(m => 
-        m.supportedGenerationMethods.includes('generateContent')
-      );
-    }
-
-    if (!selectedModel) {
-      throw new Error("No compatible models found for your API key.");
-    }
-
-    const modelName = selectedModel.name.replace("models/", ""); // Strip the 'models/' prefix if present
-    console.log(`✅ Selected Model: ${modelName}`);
-
-    // 3. Generate Content using the auto-selected model
-    const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${API_KEY}`;
     
-    const prompt = `
-    Analyze the following text. 
-    1. Extract the main idea.
-    2. Rewrite it into a SINGLE, concise sentence suitable for an AI prompt.
-    3. Do not add bolding or markdown. Just the text.
+    // Prefer 'flash' for speed, fallback to 'pro'
+    let selectedModel = listData.models?.find(m => m.name.includes('flash') && m.supportedGenerationMethods.includes('generateContent')) 
+                        || listData.models?.find(m => m.name.includes('pro'))
+                        || listData.models?.[0];
+
+    if (!selectedModel) throw new Error("No compatible models found.");
+    const modelName = selectedModel.name.replace("models/", "");
+
+    // 2. The Analysis Prompt
+    const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${API_KEY}`;
     
-    Text: "${originalText}"
+    const systemPrompt = `
+    Role: Senior Prompt Engineer.
+    Task: Analyze the user's input and upgrade it to the CO-STAR framework (Context, Objective, Style, Tone, Audience, Response).
+    
+    User Input: "${originalText}"
+
+    Output:
+    Return strictly a JSON object with this structure:
+    {
+      "score": <0-100 integer based on clarity/completeness>,
+      "missing": ["List", "of", "missing", "components"],
+      "refined": "<The FULL rewritten prompt using CO-STAR headers>"
+    }
     `;
 
-    const genResp = await fetch(generateUrl, {
+    const response = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        safetySettings: [
-          { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-          { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-          { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-          { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
-        ]
-      })
+      body: JSON.stringify({ contents: [{ parts: [{ text: systemPrompt }] }] })
     });
 
-    if (!genResp.ok) {
-      const err = await genResp.json();
-      throw new Error(`Generate Content Failed: ${JSON.stringify(err)}`);
-    }
-
-    const genData = await genResp.json();
+    const data = await response.json();
     
-    if (genData.candidates && genData.candidates.length > 0) {
-      const resultText = genData.candidates[0].content.parts[0].text;
-      sendResponse({ success: true, data: resultText });
+    if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
+        // Robust JSON cleaning (Gemini sometimes adds ```json blocks)
+        let rawText = data.candidates[0].content.parts[0].text;
+        rawText = rawText.replace(/```json/g, "").replace(/```/g, "").trim();
+        
+        try {
+            const jsonResult = JSON.parse(rawText);
+            sendResponse({ success: true, data: jsonResult });
+        } catch (e) {
+            console.error("JSON Parse Error:", rawText);
+            sendResponse({ success: false, error: "AI returned invalid format." });
+        }
     } else {
-      sendResponse({ success: false, error: "Blocked by safety filters." });
+        sendResponse({ success: false, error: "Blocked by safety filters." });
     }
 
   } catch (error) {
-    console.error("🔥 Error:", error);
     sendResponse({ success: false, error: error.message });
   }
 }
